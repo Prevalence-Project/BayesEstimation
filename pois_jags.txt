@@ -1,0 +1,19 @@
+model
+      {
+      n_DM <- N*p_DM
+      n_DMTb ~ dpois(n_DM*tau[1])
+      n_DNMTb ~ dpois(N*p_DNM*tau[1])
+      
+      n_DMT ~ dpois(n_DM*(tau[1]+tau[2]))
+      n_DNMT ~ dpois(N*p_DNM*(tau[1]+tau[2]))
+      n_NT <- n_DM-n_DMT+N*p_DNM-n_DNMT+N*p_U
+      
+      n_ODF ~ dpois(n_NT*lambda)
+      
+     
+      pi <- c(3.3,1.1,5.5)
+      tau ~ ddirch(pi)
+      p_DNM ~ dbeta(1.1,55)
+      p_U ~ dbeta(1.1,55)
+  
+      }

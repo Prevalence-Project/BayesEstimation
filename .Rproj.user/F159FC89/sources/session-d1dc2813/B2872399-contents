@@ -1,0 +1,149 @@
+---
+title: "Bayesian Evidence Synthesis for OUD Prevalence Estimate"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+```{r libraries loading, echo=F}
+library(tidyverse)
+library(rjags)
+library(coda)
+library(gtools)
+library(ggplot2)
+library(kableExtra)
+```
+# simulation function
+```{r simulation, echo=F}
+# simulate one stratum data for one county for one year
+DataSim <- function(N,p_OUD,p_DNM,p_U,tau_DMTb,tau_DMT,lambda){
+  n_OUD <- N*p_OUD
+  p_DM <- p_OUD-p_DNM-p_U
+  n_DM <- N*p_DM
+  n_DMTb <- rpois(1,n_DM*tau_DMTb)
+  n_DMNT <- rpois(1,n_DM*(1-tau_DMT))
+  while(n_DMTb+n_DMNT>n_DM){
+    n_DMNT <- rpois(1,n_DM*(1-tau_DMT))
+  } # n_DMTb + n_DMNT needs to be less than n_DM
+  p_DMT <- 1-n_DMNT/n_DM
+  p_DMTb <- n_DMTb/n_DM
+  
+  n_DNM <- N*p_DNM
+  n_DNMTb <- rpois(1,n_DNM*tau_DMTb) # assumptions of tau's
+  n_DNMNT <- rpois(1,n_DNM*(1-tau_DMT))
+  while(n_DNMNT+n_DNMTb>n_DNM){
+    n_DNMNT <- rpois(1,n_DNM*(1-tau_DMT))
+  } # n_DNMNT+n_DNMTb needs to be less than n_DNM
+  
+  n_Tb <- n_DMTb+n_DNMTb
+  p_Tb <- n_Tb/N # get p_Tb
+  n_NT <- n_DMNT+n_DNMNT+N*p_U
+  n_ODF <- rpois(1,n_NT*lambda) # get n_ODF
+  
+  return(list(p_DM=p_DM,p_DMTb=p_DMTb,p_DMT=p_DMT,p_Tb=p_Tb,n_ODF=n_ODF))
+}   
+
+```
+
+# bayesian evidence sythesis model
+```{r bayesian modeling,echo=F}
+# Bayesian Evidence Sythesis modeling using JAGS
+bayes_modeling <- function(N,lambda,op,inits,n.chains=2,n.adapt=500,n.iter=10000){
+  p_DM <- op$p_DM;
+  n_DM <- round(N*p_DM);
+  p_DMT <- op$p_DMT
+  n_DMT <- round(n_DM*p_DMT)
+  n_DMTb <- round(op$p_DMTb*n_DM);
+  n_DNMTb <- round(N*op$p_Tb-n_DMTb)
+  n_ODF <- op$n_ODF
+  
+  dat <- list("p_DM"=p_DM,"n_DMTb"=n_DMTb,"n_DMT"=n_DMT,"n_DNMTb"=n_DNMTb,"n_ODF"=n_ODF,
+       "N"=N,"lambda"=lambda)
+
+  cat("model
+      {
+      n_DM <- N*p_DM
+      n_DMTb ~ dpois(n_DM*tau[1])
+      n_DNMTb ~ dpois(N*p_DNM*tau[1])
+      
+      n_DMT ~ dpois(n_DM*(tau[1]+tau[2]))
+      n_DNMT ~ dpois(N*p_DNM*(tau[1]+tau[2]))
+      n_NT <- n_DM-n_DMT+N*p_DNM-n_DNMT+N*p_U
+      
+      n_ODF ~ dpois(n_NT*lambda)
+      
+     
+      pi <- c(3.3,1.1,5.5)
+      tau ~ ddirch(pi)
+      p_DNM ~ dbeta(1.1,55)
+      p_U ~ dbeta(1.1,55)
+  
+      }",file='pois_jags.txt')
+  
+  jags.m <- jags.model(file="pois_jags.txt",data=dat,inits = inits,
+                       n.chains=n.chains,n.adapt=n.adapt)
+  params <- c('p_DNM','p_U')
+  samps <- coda.samples( jags.m, params, n.iter=n.iter ) 
+  return(samps)
+}
+```
+
+# data simulation
+```{r table}
+# loading population and strata information
+data_df <- readRDS(file="sim_fake_data.rds")
+set.seed(1234)
+lambda <- 0.005 # same between strata within the same county
+data_df$lambda <- lambda
+
+len <- dim(data_df)[1]
+output_df <- data.frame()
+mpsrf <- rep(NA,len)
+inits <- list(tau=c(0.3,0.07,0.63), p_DNM = 0.03, p_U=0.05) # initialization of parameters
+
+for(i in 1:len){
+  input <- data_df[i,]
+  # simulate ground truth values
+  N <- input$Population
+  p_DNM <- rbeta(1,1.1,55)
+  p_U <- rbeta(1,1.1,55)
+  tau <- rdirichlet(1,c(3.3,1.1,5.5)) # [tau_DMTb, tau_DMTo, tau_NT]
+  tau_DMTb <- tau[1]
+  tau_DMT <- tau[1]+tau[2]
+  p_OUD <- p_DNM+p_U+rbeta(1,1,150)
+  
+  # generate "data" for bayesian modeling
+  data_sim <- DataSim(N=N,p_OUD = p_OUD,p_DNM=p_DNM,p_U=p_U,tau_DMTb=tau_DMTb,
+                tau_DMT=tau_DMT,lambda = lambda)
+  samps1 <- bayes_modeling(N=N,lambda=lambda,data_sim,inits,
+                n.chains=2,n.adapt=5000,n.iter=20000)
+  a <- summary(samps1)
+  res <- gelman.diag(samps1)
+  mpsrf[i] <- res$mpsrf 
+  # multivariate convergence statistics: if the chain converges, mpsrf should be less than 1.1
+
+  op <- cbind(input,"p_DNM"=p_DNM,"p_U"=p_U,"p_OUD"=p_OUD,
+              "p_DM"=data_sim$p_DM,"p_DMTb"=data_sim$p_DMTb,"p_DMT"=data_sim$p_DMT,
+              "p_Tb"=data_sim$p_Tb,"n_ODF"=data_sim$n_ODF,
+              "psrf_DNM"=res$psrf[1,1],"psrf_U"=res$psrf[2,1], 
+              # partial convergence diagnosis statistics; if converging, psrf should be less than 1.1
+              "p_DNM_mean"=a$statistics[1,1],"p_DNM_sd"=a$statistics[1,2],
+              "p_DNM_lb"=a$quantiles[1,1],"p_DNM_ub"=a$quantiles[1,5],
+              "p_U_mean"=a$statistics[2,1],"p_U_sd"=a$statistics[2,2],
+              "p_U_lb"=a$quantiles[2,1],"p_U_ub"=a$quantiles[2,5])
+  output_df <- rbind(output_df,op)
+
+}
+
+# compute overall OUD prevalence estimate
+output_df <- output_df %>%
+  mutate(p_OUD_mean = p_DM+p_U_mean+p_DNM_mean,
+         p_OUD_lb = p_DM+p_U_lb+p_DNM_lb,
+         p_OUD_ub = p_DM+p_U_ub+p_DNM_lb)
+```
+
+```{R}
+head(output_df)
+```
+
+
+
